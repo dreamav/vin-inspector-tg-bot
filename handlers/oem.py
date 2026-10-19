@@ -8,6 +8,7 @@ from api_client import VINInspectorAPI
 from states.vin_states import VinInspectorStates
 from keyboards.inline import (
     get_oem_result_keyboard,
+    get_full_fitment_keyboard,
     get_cancel_oem_keyboard,
 )
 
