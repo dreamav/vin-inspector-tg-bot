@@ -17,6 +17,64 @@ router = Router(name="oem")
 VIN_REGEX = re.compile(r"^[A-HJ-NPR-Z0-9]{17}$")
 
 
+def is_vehicle_match(item: dict, car_title: str, make: str, model: str) -> bool:
+    """Определяет, совпадает ли автомобиль из таблицы совместимости с текущим авто."""
+    target = f"{car_title} {make} {model}".lower().strip()
+    ymm = (item.get("yearMakeModel") or "").lower()
+    if not ymm or not target:
+        return False
+    words = re.findall(r"[a-z0-9]{3,}", target)
+    if not words:
+        return False
+    matches = [w for w in words if w in ymm]
+    return len(matches) >= min(2, len(words))
+
+
+def format_fitment_summary(
+    vehicles: list[dict],
+    car_title: str = "",
+    make: str = "",
+    model: str = "",
+    max_items: int = 5
+) -> str:
+    """Форматирует компактный блок списка совместимых автомобилей для карточки OEM."""
+    if not vehicles:
+        return (
+            "📋 <b>Список совместимых авто:</b>\n"
+            "<i>Детальная таблица доступна на странице детали в онлайн-каталоге.</i>"
+        )
+
+    total = len(vehicles)
+    shown = vehicles[:max_items]
+
+    lines = [f"📋 <b>Список совместимых автомобилей (найдено: {total}):</b>"]
+
+    for item in shown:
+        ymm = html.escape((item.get("yearMakeModel") or "Модель не указана").strip())
+        trim = html.escape((item.get("trimEngine") or "").strip())
+        options = html.escape((item.get("options") or "").strip())
+
+        is_match = is_vehicle_match(item, car_title, make, model)
+        badge = " ⭐️ <b>[Текущее авто]</b>" if is_match else ""
+
+        entry_text = f"• <b>{ymm}</b>{badge}"
+        details = []
+        if trim and trim != "—":
+            details.append(f"Двигатель: {trim}")
+        if options and options != "—":
+            details.append(f"Опции: {options}")
+
+        if details:
+            entry_text += f"\n  └ <i>{'; '.join(details)}</i>"
+
+        lines.append(entry_text)
+
+    if total > max_items:
+        lines.append(f"<i>...и ещё {total - max_items} модификаций (нажмите кнопку ниже)</i>")
+
+    return "\n".join(lines)
+
+
 @router.callback_query(F.data == "action:check_oem")
 async def start_oem_check(callback: CallbackQuery, state: FSMContext):
     """Переход в режим ввода артикула (OEM) для текущего автомобиля."""
@@ -71,7 +129,6 @@ async def process_oem_input(
     # Если пользователь внезапно ввёл 17-значный VIN вместо артикула
     if len(clean_code) == 17 and VIN_REGEX.match(clean_code):
         await state.set_state(VinInspectorStates.waiting_for_vin)
-        # Передаём управление обработчику VIN
         from handlers.vin import handle_vin_message
         await handle_vin_message(message, state, api_client)
         return
@@ -79,6 +136,8 @@ async def process_oem_input(
     data = await state.get_data()
     vin = data.get("vin")
     brand = data.get("brand_id") or data.get("make", "")
+    make = data.get("make", "")
+    model = data.get("model", "")
     car_title = data.get("car_title") or "Автомобиль"
 
     if not vin:
@@ -90,7 +149,7 @@ async def process_oem_input(
 
     if len(clean_code) < 3:
         await message.answer(
-            "❌ Слишком короткий артикул. Артикул запчасти обычно содержит от 4 до 15 символов.\n"
+            "❌ Слишком короткий артикул. Номер детали обычно содержит от 4 до 15 символов.\n"
             "💡 Пример: <code>06E115562A</code>\n\n"
             "Попробуйте ввести номер ещё раз:",
             reply_markup=get_cancel_oem_keyboard()
@@ -125,6 +184,15 @@ async def process_oem_input(
     status = (result.get("status") or "").lower()
     confirm_text = result.get("confirmText") or ""
     part_url = result.get("partUrl") or result.get("cleanPartUrl")
+    fitment_vehicles = result.get("fitmentVehicles") or []
+
+    # Сохраняем результат в FSM для просмотра полного списка совместимых авто
+    await state.update_data(
+        last_fitment=fitment_vehicles,
+        last_oem=oem_out,
+        last_part_title=part_title,
+        last_part_url=part_url,
+    )
 
     # Формируем статус совместимости
     if status == "fit":
@@ -150,11 +218,97 @@ async def process_oem_input(
     if confirm_text:
         lines.append(f"💬 <i>Подтверждение каталога:</i> {html.escape(confirm_text)}")
 
+    # Добавляем блок совместимых автомобилей
+    lines.append("")
+    lines.append(format_fitment_summary(
+        fitment_vehicles,
+        car_title=car_title,
+        make=make,
+        model=model,
+        max_items=5
+    ))
+
     card_text = "\n".join(lines)
-    keyboard = get_oem_result_keyboard(part_url=part_url)
+    keyboard = get_oem_result_keyboard(
+        part_url=part_url,
+        has_more_fitment=len(fitment_vehicles) > 5,
+        fitment_count=len(fitment_vehicles)
+    )
 
     await message.answer(
         card_text,
         reply_markup=keyboard,
         disable_web_page_preview=True
     )
+
+
+@router.callback_query(F.data == "action:all_fitment")
+async def show_all_fitment_vehicles(callback: CallbackQuery, state: FSMContext):
+    """Показывает полный список совместимых автомобилей."""
+    data = await state.get_data()
+    vehicles = data.get("last_fitment") or []
+    oem = data.get("last_oem", "")
+    part_title = data.get("last_part_title", "Запчасть")
+    part_url = data.get("last_part_url")
+    car_title = data.get("car_title", "")
+    make = data.get("make", "")
+    model = data.get("model", "")
+
+    if not vehicles:
+        await callback.answer("Список совместимых автомобилей пуст.", show_alert=True)
+        return
+
+    header = (
+        f"📋 <b>Полный список совместимых автомобилей ({len(vehicles)} шт.)</b>\n"
+        f"📦 <b>Деталь:</b> {html.escape(part_title)} (<code>{html.escape(oem)}</code>)\n\n"
+    )
+
+    items_text = []
+    for idx, item in enumerate(vehicles, 1):
+        ymm = html.escape((item.get("yearMakeModel") or "Модель не указана").strip())
+        trim = html.escape((item.get("trimEngine") or "").strip())
+        options = html.escape((item.get("options") or "").strip())
+
+        is_match = is_vehicle_match(item, car_title, make, model)
+        badge = " ⭐️ <b>[Текущее авто]</b>" if is_match else ""
+
+        row = [f"<b>{idx}. {ymm}</b>{badge}"]
+        if trim and trim != "—":
+            row.append(f"   ├ <i>Двигатель:</i> {trim}")
+        if options and options != "—":
+            row.append(f"   └ <i>Опции:</i> {options}")
+
+        items_text.append("\n".join(row))
+
+    # Склеиваем сообщения, учитывая лимит Telegram 4096 символов
+    full_body = "\n\n".join(items_text)
+    keyboard = get_full_fitment_keyboard(part_url=part_url)
+
+    if len(header) + len(full_body) <= 4000:
+        await callback.message.answer(
+            header + full_body,
+            reply_markup=keyboard,
+            disable_web_page_preview=True
+        )
+    else:
+        # Если список очень длинный, отправляем частями
+        chunks = []
+        current_chunk = header
+        for entry in items_text:
+            if len(current_chunk) + len(entry) + 2 > 3800:
+                chunks.append(current_chunk)
+                current_chunk = entry + "\n\n"
+            else:
+                current_chunk += entry + "\n\n"
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        for i, chunk in enumerate(chunks):
+            is_last = (i == len(chunks) - 1)
+            await callback.message.answer(
+                chunk,
+                reply_markup=keyboard if is_last else None,
+                disable_web_page_preview=True
+            )
+
+    await callback.answer()

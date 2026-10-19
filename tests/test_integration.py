@@ -40,11 +40,21 @@ async def main():
     assert res.get("success") is True, "decode_vin returned success != True"
     assert res.get("make") == "Audi", f"Expected Audi, got {res.get('make')}"
 
-    print("2. Тест check_oem...")
+    print("2. Тест check_oem (Audi)...")
     oem_res = await api.check_oem(oem="06E115562A", brand="audi", vin="WAUZZZ8K9BA123456")
     print("Ответ check_oem:", oem_res)
     assert oem_res.get("success") is True, "check_oem returned success != True"
     assert oem_res.get("status") in ("fit", "not-fit"), f"Unexpected status {oem_res.get('status')}"
+
+    print("3. Тест check_oem со списком совместимых авто (Toyota)...")
+    oem_toyota = await api.check_oem(oem="04152-YZZA6", brand="toyota", vin="")
+    assert oem_toyota.get("success") is True, "Toyota check_oem failed"
+    fitment = oem_toyota.get("fitmentVehicles", [])
+    print(f"Найдено совместимых авто: {len(fitment)}")
+    assert len(fitment) > 0, "Expected fitmentVehicles to be non-empty"
+    from handlers.oem import format_fitment_summary
+    summary = format_fitment_summary(fitment, car_title="2016 Scion iM", make="Scion", model="iM")
+    assert "⭐️ <b>[Текущее авто]</b>" in summary, "Matching vehicle was not tagged"
 
     await api.close()
     print("\n✅ ВСЕ ТЕСТЫ УСПЕШНО ПРОЙДЕНЫ!")
